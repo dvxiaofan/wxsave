@@ -1,24 +1,11 @@
 #!/usr/bin/env zsh
 # wxsave - archive a WeChat Official Account article as a single HTML file.
-# Usage: wxsave <url>
+# Usage:
+#   wxsave <url>                        archive one article
+#   wxsave --migrate [--dry-run]        re-group existing top-level .html files
+#                                        in the archive into <nickname>/ subdirs
 
 set -e
-
-URL="${1:-}"
-if [[ -z "$URL" ]]; then
-  cat >&2 <<'USAGE'
-Usage: wxsave <url>
-Example:
-  wxsave https://mp.weixin.qq.com/s/XXXXXXXXXXXXXXXXXX
-
-Articles are saved to ~/Documents/wechat-archive
-USAGE
-  exit 1
-fi
-
-if [[ "$URL" != https://mp.weixin.qq.com/* ]]; then
-  print -u2 "[wxsave] note: URL does not start with https://mp.weixin.qq.com/ - continuing anyway"
-fi
 
 # Resolve script location (follow symlinks) so helpers can live next to us.
 SCRIPT="${0:A}"
@@ -27,14 +14,61 @@ REPO_ROOT="${SCRIPT_DIR:h}"
 
 HELPER="$REPO_ROOT/lib/wxsave-helper.js"
 POST="$REPO_ROOT/lib/wxsave-postprocess.js"
+MIGRATE="$REPO_ROOT/lib/wxsave-migrate.js"
+REPAIR="$REPO_ROOT/lib/wxsave-repair.js"
 
 # Legacy install fallback for people who copied files into ~/.local/share/wxsave
 if [[ ! -f "$HELPER" ]]; then
   HELPER="$HOME/.local/share/wxsave/wxsave-helper.js"
   POST="$HOME/.local/share/wxsave/wxsave-postprocess.js"
+  MIGRATE="$HOME/.local/share/wxsave/wxsave-migrate.js"
+  REPAIR="$HOME/.local/share/wxsave/wxsave-repair.js"
 fi
 
 OUT_DIR="${WXSAVE_OUTPUT_DIR:-$HOME/Documents/wechat-archive}"
+
+# --migrate: re-group existing archived files into <nickname>/ subdirs.
+if [[ "${1:-}" == "--migrate" ]]; then
+  shift
+  if [[ ! -f "$MIGRATE" ]]; then
+    print -u2 "[wxsave] migrate script missing: $MIGRATE"
+    exit 1
+  fi
+  mkdir -p "$OUT_DIR"
+  exec node "$MIGRATE" "$OUT_DIR" "$@"
+fi
+
+# --repair: scan archive and repair known HTML corruption (orphan SVG values).
+if [[ "${1:-}" == "--repair" ]]; then
+  shift
+  if [[ ! -f "$REPAIR" ]]; then
+    print -u2 "[wxsave] repair script missing: $REPAIR"
+    exit 1
+  fi
+  mkdir -p "$OUT_DIR"
+  exec node "$REPAIR" "$OUT_DIR" "$@"
+fi
+
+URL="${1:-}"
+if [[ -z "$URL" ]]; then
+  cat >&2 <<'USAGE'
+Usage:
+  wxsave <url>                    archive one WeChat article
+  wxsave --migrate [--dry-run]    re-group existing archived .html files
+  wxsave --repair  [--dry-run]    repair known HTML corruption in archive
+
+Example:
+  wxsave https://mp.weixin.qq.com/s/XXXXXXXXXXXXXXXXXX
+
+Articles are saved to ~/Documents/wechat-archive/<公众号名字>/
+USAGE
+  exit 1
+fi
+
+if [[ "$URL" != https://mp.weixin.qq.com/* ]]; then
+  print -u2 "[wxsave] note: URL does not start with https://mp.weixin.qq.com/ - continuing anyway"
+fi
+
 DATE="$(date +%Y-%m-%d)"
 
 mkdir -p "$OUT_DIR"
@@ -69,9 +103,19 @@ single-file "$URL" \
 
 NEW_FILE="$(ls -1t "$OUT_DIR"/*.html 2>/dev/null | head -1)"
 if [[ -n "$NEW_FILE" ]]; then
-  node "$POST" "$NEW_FILE" || print -u2 "[wxsave] post-process failed; HTML kept as-is"
-  FINAL_FILE="$(ls -1t "$OUT_DIR"/*.html 2>/dev/null | head -1)"
-  print "[wxsave] saved: $FINAL_FILE"
+  if POST_OUT="$(node "$POST" "$NEW_FILE" 2>&1)"; then
+    print -r -- "$POST_OUT"
+    FINAL_FILE="$(print -r -- "$POST_OUT" \
+      | grep -E '^\[wxsave-post\] final: ' \
+      | tail -1 \
+      | sed -E 's/^\[wxsave-post\] final: //' || true)"
+    [[ -z "$FINAL_FILE" ]] && FINAL_FILE="$NEW_FILE"
+    print "[wxsave] saved: $FINAL_FILE"
+  else
+    print -r -- "$POST_OUT" >&2
+    print -u2 "[wxsave] post-process failed; HTML kept as-is"
+    print "[wxsave] saved: $NEW_FILE"
+  fi
 fi
 
 print "[wxsave] done"
