@@ -1,0 +1,77 @@
+#!/usr/bin/env zsh
+# wxsave - archive a WeChat Official Account article as a single HTML file.
+# Usage: wxsave <url>
+
+set -e
+
+URL="${1:-}"
+if [[ -z "$URL" ]]; then
+  cat >&2 <<'USAGE'
+Usage: wxsave <url>
+Example:
+  wxsave https://mp.weixin.qq.com/s/XXXXXXXXXXXXXXXXXX
+
+Articles are saved to ~/Documents/wechat-archive
+USAGE
+  exit 1
+fi
+
+if [[ "$URL" != https://mp.weixin.qq.com/* ]]; then
+  print -u2 "[wxsave] note: URL does not start with https://mp.weixin.qq.com/ - continuing anyway"
+fi
+
+# Resolve script location (follow symlinks) so helpers can live next to us.
+SCRIPT="${0:A}"
+SCRIPT_DIR="${SCRIPT:h}"
+REPO_ROOT="${SCRIPT_DIR:h}"
+
+HELPER="$REPO_ROOT/lib/wxsave-helper.js"
+POST="$REPO_ROOT/lib/wxsave-postprocess.js"
+
+# Legacy install fallback for people who copied files into ~/.local/share/wxsave
+if [[ ! -f "$HELPER" ]]; then
+  HELPER="$HOME/.local/share/wxsave/wxsave-helper.js"
+  POST="$HOME/.local/share/wxsave/wxsave-postprocess.js"
+fi
+
+OUT_DIR="${WXSAVE_OUTPUT_DIR:-$HOME/Documents/wechat-archive}"
+DATE="$(date +%Y-%m-%d)"
+
+mkdir -p "$OUT_DIR"
+
+if [[ ! -f "$HELPER" ]]; then
+  print -u2 "[wxsave] helper script missing: $HELPER"
+  exit 1
+fi
+
+if ! command -v single-file >/dev/null 2>&1; then
+  print -u2 "[wxsave] single-file-cli not found. Install with:"
+  print -u2 "         npm install -g single-file-cli"
+  exit 1
+fi
+
+print "[wxsave] archiving: $URL"
+print "[wxsave] saving to: $OUT_DIR"
+
+single-file "$URL" \
+  --output-directory "$OUT_DIR" \
+  --filename-template "${DATE}_%if-empty<{page-title}|untitled>.{filename-extension}" \
+  --filename-conflict-action uniquify \
+  --http-header "Referer=https://mp.weixin.qq.com/" \
+  --browser-script "$HELPER" \
+  --load-deferred-images true \
+  --load-deferred-images-dispatch-scroll-event true \
+  --load-deferred-images-max-idle-time 3000 \
+  --browser-wait-until networkIdle \
+  --browser-wait-delay 2000 \
+  --browser-wait-end-delay 1500 \
+  --user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+NEW_FILE="$(ls -1t "$OUT_DIR"/*.html 2>/dev/null | head -1)"
+if [[ -n "$NEW_FILE" ]]; then
+  node "$POST" "$NEW_FILE" || print -u2 "[wxsave] post-process failed; HTML kept as-is"
+  FINAL_FILE="$(ls -1t "$OUT_DIR"/*.html 2>/dev/null | head -1)"
+  print "[wxsave] saved: $FINAL_FILE"
+fi
+
+print "[wxsave] done"
