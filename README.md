@@ -10,6 +10,7 @@
 - SingleFile 序列化偶发的 `<img>` 结构破损（orphan SVG 占位值把后续属性文本挤出标签外）自动修复
 - 排版 100% 还原（不做 Markdown 转换这种有损操作）
 - 定时监控指定公众号的新文章，自动归档到本地
+- 归档后自动生成按公众号分组、按日期倒序的索引页，直接浏览器翻阅
 
 ## 安装
 
@@ -60,6 +61,23 @@ wxsave --repair              # 原地重写
 ```
 
 同样的修复已经内置到 `lib/wxsave-postprocess.js` 的 step 0，新保存的文章会自动走一遍 —— 所以 `--repair` 只需要对老文件跑一次。
+
+### 归档索引页（`--reindex`）
+
+每次 `wxsave <url>` 归档成功后会**自动**刷新两级索引：
+
+- `<OUT_DIR>/index.html` — 全部公众号的卡片列表（文章数 + 最新日期），点击进号内页
+- `<OUT_DIR>/<公众号名字>/index.html` — 该号所有文章，按发布日期倒序
+
+直接浏览器打开 `<OUT_DIR>/index.html` 就能翻阅，手机 / 暗色模式自适应；搭配静态文件服务器（如 Caddy `file_server`）也是默认优先 serve `index.html`，远程访问零额外配置。
+
+需要手动重建（比如外部工具往 `OUT_DIR` 里拷了文件）：
+
+```bash
+wxsave --reindex
+```
+
+`--migrate` 和 `--repair` 跑完有实际变更时也会自动跑一次重建。
 
 ### 自动监控新文章（`wxwatch`）
 
@@ -123,19 +141,21 @@ OUT_DIR="${WXSAVE_OUTPUT_DIR:-$HOME/Documents/wechat-archive}"
    - **step 1**：对仍有 `data-src` 但没有真实 `src` 的图片，直接在 Node 里 `fetch` 下来转 base64 内联（没有 CORS 限制）
    - **step 2**：提取发布日期（`<em id=publish_time>` → `<meta article:published_time>` → JS 变量 `var ct=...`）和公众号名字（DOM 的 `id=js_name` → 内联 `var nickname=...` → `<meta og:site_name|author>`），把文件移动到 `<OUT_DIR>/<公众号名字>/<YYYY-MM-DD>_<title>.html`
 4. **`wxwatch`**（python3）：拉 Wechat2RSS 的 feed XML → 按 `__biz+mid+idx` 或 `/s/<token>` 做 dedup key → 对未见 item `subprocess.run(["wxsave", url])`，归档完才写 state，失败下次自动重试。
+5. **`lib/wxsave-index.js`**：归档结束（以及 `--migrate` / `--repair` 批量操作结束）后自动跑一次，walk `OUT_DIR` → 按公众号分组、按日期倒序 → 生成 `index.html` + `<公众号>/index.html`。纯静态产物，零 runtime 依赖。
 
 ## 项目结构
 
 ```
 wxsave/
 ├── bin/
-│   ├── wxsave                  # zsh 入口脚本；分发 --migrate / --repair
+│   ├── wxsave                  # zsh 入口脚本；分发 --migrate / --repair / --reindex
 │   └── wxwatch                 # python3 监控脚本；调 wxsave 自动归档
 ├── lib/
 │   ├── wxsave-helper.js        # 浏览器内注入脚本（懒加载处理）
 │   ├── wxsave-postprocess.js   # Node 后处理（orphan SVG 修复 + 图片 fetch + 按公众号归档）
 │   ├── wxsave-migrate.js       # 旧文件一次性搬到 <公众号名字>/ 子目录
-│   └── wxsave-repair.js        # 递归扫描 archive 修复 orphan SVG 片段
+│   ├── wxsave-repair.js        # 递归扫描 archive 修复 orphan SVG 片段
+│   └── wxsave-index.js         # 生成两级 index.html，归档后自动调一次
 ├── install.sh                  # 软链 wxsave + wxwatch 到 ~/.local/bin
 └── README.md
 ```
