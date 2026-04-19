@@ -1,6 +1,6 @@
 # wxsave
 
-把微信公众号文章完整归档为单个离线 HTML 文件，即使原文被删也能原样查看。按**公众号名字自动分子目录**存放，易于长期维护。
+把微信公众号文章完整归档为单个离线 HTML 文件，即使原文被删也能原样查看。按**公众号名字自动分子目录**存放，易于长期维护。配套 `wxwatch` 可以配合 Wechat2RSS 做**新文章自动监控 + 归档**。
 
 解决的问题：
 - 公众号图片防盗链（需要 `Referer`）
@@ -9,6 +9,7 @@
 - 公众号名字自动提取，用作子目录名
 - SingleFile 序列化偶发的 `<img>` 结构破损（orphan SVG 占位值把后续属性文本挤出标签外）自动修复
 - 排版 100% 还原（不做 Markdown 转换这种有损操作）
+- 定时监控指定公众号的新文章，自动归档到本地
 
 ## 安装
 
@@ -21,7 +22,7 @@ cd wxsave
 ./install.sh
 ```
 
-`install.sh` 会把 `bin/wxsave` 软链到 `~/.local/bin/wxsave`。确认 `~/.local/bin` 在你的 `PATH` 里即可。
+`install.sh` 会把 `bin/wxsave` 和 `bin/wxwatch` 都软链到 `~/.local/bin/`。确认 `~/.local/bin` 在你的 `PATH` 里即可。
 
 ## 使用
 
@@ -47,7 +48,7 @@ wxsave --migrate             # 实际移动
 
 提取不到公众号名字的文件留在原地并打 warning，便于你手动处理。
 
-### 修复历史坏文件（`--repair`)
+### 修复历史坏文件（`--repair`）
 
 部分早期保存的文件里，`<img src="...占位 GIF..."` 后被挤入了孤立的 SVG 占位值（形如 `'data:image/svg+xml,<svg ...><rect fill-opacity="0"/></svg>'`）。SVG 里的 `>` 会提前闭合 `<img>`，导致浏览器把后面的属性当文本显示出来（典型症状：页面里出现裸露的 `_width=16px data-order=1 data-report-img-idx=2 data-fail=0>`）。
 
@@ -59,6 +60,38 @@ wxsave --repair              # 原地重写
 ```
 
 同样的修复已经内置到 `lib/wxsave-postprocess.js` 的 step 0，新保存的文章会自动走一遍 —— 所以 `--repair` 只需要对老文件跑一次。
+
+### 自动监控新文章（`wxwatch`）
+
+`wxwatch` 配合 [Wechat2RSS](https://wechat2rss.xlab.app/)（免费的微信公众号 RSS 服务）做**定时拉 feed → 去重 → 自动调 `wxsave` 归档新文章**。
+
+**一次性注册**：
+
+1. 到 [wechat2rss.xlab.app/list/](https://wechat2rss.xlab.app/list/) 找到目标公众号，记录 feed URL 里末尾的 40-char hex id
+2. `wxwatch --add <公众号名字> <feed_id>`
+
+`--add` 默认会 **seed**：把 feed 里当前所有 item 标记为"已看过"，首次运行只抓注册之后**真正新发布**的文章，避免一次把历史 20 条全 pull 下来。想反向（首跑把历史全抓）加 `--no-seed`。
+
+**日常命令**：
+
+```bash
+wxwatch --list                  # 已注册的公众号和状态
+wxwatch <名字>                  # 手动触发一次（一般由 cron 跑）
+wxwatch <名字> --dry-run        # 只打印会抓什么，不归档
+```
+
+**挂 cron 每 20 分钟跑一次**（Wechat2RSS 自身延迟约 6 小时，跑更快没意义）：
+
+```bash
+(crontab -l 2>/dev/null | grep -v 'wxwatch <名字>'; \
+ echo '*/20 * * * * ~/.local/bin/wxwatch <名字> >> ~/Documents/wechat-archive/.wxwatch.log 2>&1') | crontab -
+```
+
+**文件位置**：
+
+- Feed 配置：`~/.local/share/wxwatch/feeds.json`
+- 每个公众号的 seen 状态：`~/.local/share/wxwatch/<名字>.state.json`
+- 日志：`~/Documents/wechat-archive/.wxwatch.log`
 
 ## 配置
 
@@ -79,6 +112,8 @@ OUT_DIR="${WXSAVE_OUTPUT_DIR:-$HOME/Documents/wechat-archive}"
    ```
 3. **改源文件**：直接把 `bin/wxsave` 里的 `$HOME/Documents/wechat-archive` 改掉 —— 不推荐，后续 `git pull` 会冲突。
 
+`wxwatch` 也读同一个 `WXSAVE_OUTPUT_DIR`（用于定位日志文件），所以一处设置两处生效。
+
 ## 工作原理
 
 1. **SingleFile CLI** 驱动 headless Chrome，加 `Referer=https://mp.weixin.qq.com/` 解决防盗链，把页面打包成自包含单文件 HTML（CSS/字体全内联）。
@@ -87,25 +122,28 @@ OUT_DIR="${WXSAVE_OUTPUT_DIR:-$HOME/Documents/wechat-archive}"
    - **step 0**：修复 orphan SVG 占位值（见 `--repair` 那一节）
    - **step 1**：对仍有 `data-src` 但没有真实 `src` 的图片，直接在 Node 里 `fetch` 下来转 base64 内联（没有 CORS 限制）
    - **step 2**：提取发布日期（`<em id=publish_time>` → `<meta article:published_time>` → JS 变量 `var ct=...`）和公众号名字（DOM 的 `id=js_name` → 内联 `var nickname=...` → `<meta og:site_name|author>`），把文件移动到 `<OUT_DIR>/<公众号名字>/<YYYY-MM-DD>_<title>.html`
+4. **`wxwatch`**（python3）：拉 Wechat2RSS 的 feed XML → 按 `__biz+mid+idx` 或 `/s/<token>` 做 dedup key → 对未见 item `subprocess.run(["wxsave", url])`，归档完才写 state，失败下次自动重试。
 
 ## 项目结构
 
 ```
 wxsave/
 ├── bin/
-│   └── wxsave                  # zsh 入口脚本；分发 --migrate / --repair
+│   ├── wxsave                  # zsh 入口脚本；分发 --migrate / --repair
+│   └── wxwatch                 # python3 监控脚本；调 wxsave 自动归档
 ├── lib/
 │   ├── wxsave-helper.js        # 浏览器内注入脚本（懒加载处理）
 │   ├── wxsave-postprocess.js   # Node 后处理（orphan SVG 修复 + 图片 fetch + 按公众号归档）
 │   ├── wxsave-migrate.js       # 旧文件一次性搬到 <公众号名字>/ 子目录
 │   └── wxsave-repair.js        # 递归扫描 archive 修复 orphan SVG 片段
-├── install.sh                  # 软链到 ~/.local/bin
+├── install.sh                  # 软链 wxsave + wxwatch 到 ~/.local/bin
 └── README.md
 ```
 
 ## 依赖
 
 - Node.js 18+（需要内置 `fetch`）
+- Python 3.9+（`wxwatch` 使用，macOS 自带）
 - [single-file-cli](https://github.com/gildas-lormeau/single-file-cli) 2.x
 - Google Chrome 或 Chromium
 

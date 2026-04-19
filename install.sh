@@ -4,17 +4,18 @@
 set -e
 
 REPO_DIR="${0:A:h}"
-TARGET="$HOME/.local/bin/wxsave"
 
 mkdir -p "$HOME/.local/bin"
 
-if [[ -L "$TARGET" || -e "$TARGET" ]]; then
-  print "[install] removing existing $TARGET"
-  rm -f "$TARGET"
-fi
-
-ln -s "$REPO_DIR/bin/wxsave" "$TARGET"
-print "[install] linked $TARGET -> $REPO_DIR/bin/wxsave"
+for cmd in wxsave wxwatch; do
+  TARGET="$HOME/.local/bin/$cmd"
+  if [[ -L "$TARGET" || -e "$TARGET" ]]; then
+    print "[install] removing existing $TARGET"
+    rm -f "$TARGET"
+  fi
+  ln -s "$REPO_DIR/bin/$cmd" "$TARGET"
+  print "[install] linked $TARGET -> $REPO_DIR/bin/$cmd"
+done
 
 if ! command -v single-file >/dev/null 2>&1; then
   print "[install] warning: single-file-cli not installed"

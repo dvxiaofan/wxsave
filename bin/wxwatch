@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""
+wxwatch - Monitor a WeChat Official Account via a Wechat2RSS feed and
+auto-archive new articles using the local `wxsave` command.
+
+Commands:
+  wxwatch <name>                   run once: fetch feed, archive new items
+  wxwatch <name> --dry-run         preview: print what would be archived
+  wxwatch --add <name> <feed_id>   register a feed; seeds current items
+                                    as "seen" so the first real run only
+                                    picks up articles published AFTER now
+  wxwatch --add <name> <feed_id> --no-seed
+                                    register without seeding; first run will
+                                    archive everything currently in the feed
+  wxwatch --list                   show registered feeds and their state
+  wxwatch --help
+
+Config / state / log:
+  Feeds map    : ~/.local/share/wxwatch/feeds.json
+  State files  : ~/.local/share/wxwatch/<name>.state.json
+  Log          : $WXSAVE_OUTPUT_DIR/.wxwatch.log
+                 (defaults to ~/Documents/wechat-archive/.wxwatch.log)
+
+Exit codes:
+  0   success (including "no new items")
+  1   runtime error (feed fetch, parse, etc.)
+  2   usage error (unregistered feed, invalid id, etc.)
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+HOME = Path.home()
+STATE_DIR = HOME / ".local/share/wxwatch"
+FEEDS_FILE = STATE_DIR / "feeds.json"
+LOG_DIR = Path(
+    os.environ.get("WXSAVE_OUTPUT_DIR") or HOME / "Documents/wechat-archive"
+)
+LOG_FILE = LOG_DIR / ".wxwatch.log"
+FEED_URL_FMT = "https://wechat2rss.xlab.app/feed/{}.xml"
+WXSAVE_BIN = os.environ.get("WXWATCH_WXSAVE") or str(HOME / ".local/bin/wxsave")
+FETCH_TIMEOUT = 30          # seconds, RSS fetch
+WXSAVE_TIMEOUT = 240        # seconds, per-article archive (headless Chrome)
+
+# Fallback PATH entries for cron / launchd sessions that have a minimal PATH.
+CRON_PATH_EXTRA = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    str(HOME / ".local/bin"),
+]
+
+TAG = "[wxwatch]"
+
+
+def log(msg: str, name: str | None = None) -> None:
+    stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    prefix = f"[{stamp}]" + (f" [{name}]" if name else "")
+    line = f"{prefix} {msg}"
+    print(line, flush=True)
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        print(f"{TAG} log write failed: {e}", file=sys.stderr)
+
+
+def ensure_state_dir() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_feeds() -> dict:
+    if not FEEDS_FILE.exists():
+        return {}
+    try:
+        return json.loads(FEEDS_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        print(f"{TAG} feeds.json corrupted: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def save_feeds(feeds: dict) -> None:
+    ensure_state_dir()
+    FEEDS_FILE.write_text(
+        json.dumps(feeds, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def state_file(name: str) -> Path:
+    safe = re.sub(r"[^\w.\-\u4e00-\u9fff]", "_", name)
+    return STATE_DIR / f"{safe}.state.json"
+
+
+def load_state(name: str) -> dict:
+    p = state_file(name)
+    if not p.exists():
+        return {"seen": []}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"seen": []}
+
+
+def save_state(name: str, state: dict) -> None:
+    ensure_state_dir()
+    p = state_file(name)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(p)
+
+
+def fetch_feed(feed_id: str) -> bytes:
+    url = FEED_URL_FMT.format(feed_id)
+    req = urllib.request.Request(url, headers={"User-Agent": "wxwatch/1"})
+    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+        return resp.read()
+
+
+def parse_items(xml_bytes: bytes) -> list[dict]:
+    """Return list of {link, guid, title, pub_date} dicts."""
+    root = ET.fromstring(xml_bytes)
+    items = []
+    for it in root.findall(".//item"):
+        link_el = it.find("link")
+        link = (link_el.text or "").strip() if link_el is not None else ""
+        if not link:
+            continue
+        guid_el = it.find("guid")
+        title_el = it.find("title")
+        date_el = it.find("pubDate")
+        items.append({
+            "link": link,
+            "guid": ((guid_el.text or "").strip() if guid_el is not None else "") or link,
+            "title": (title_el.text or "").strip() if title_el is not None else "",
+            "pub_date": (date_el.text or "").strip() if date_el is not None else "",
+        })
+    return items
+
+
+def normalize_link(url: str) -> str:
+    """Stable dedup key: prefer /s/<token>, fall back to __biz+mid+idx, else stripped url."""
+    if "mp.weixin.qq.com" not in url:
+        return url.split("#")[0]
+    m = re.search(r"mp\.weixin\.qq\.com/s/([A-Za-z0-9_\-]+)", url)
+    if m:
+        return f"mp.weixin.qq.com/s/{m.group(1)}"
+    p = urlparse(url)
+    q = parse_qs(p.query)
+    biz = (q.get("__biz") or [""])[0]
+    mid = (q.get("mid") or [""])[0]
+    idx = (q.get("idx") or [""])[0]
+    if biz and mid and idx:
+        return f"mp.weixin.qq.com/?__biz={biz}&mid={mid}&idx={idx}"
+    return url.split("#")[0].split("?")[0]
+
+
+def run_wxsave(url: str, name: str) -> tuple[bool, str | None]:
+    if not os.path.isfile(WXSAVE_BIN):
+        log(f"wxsave not found at {WXSAVE_BIN}; set $WXWATCH_WXSAVE or install first", name)
+        return False, None
+    env = os.environ.copy()
+    existing = env.get("PATH", "").split(":")
+    for p in CRON_PATH_EXTRA:
+        if p and p not in existing:
+            existing.append(p)
+    env["PATH"] = ":".join(existing)
+    try:
+        result = subprocess.run(
+            [WXSAVE_BIN, url],
+            capture_output=True,
+            text=True,
+            timeout=WXSAVE_TIMEOUT,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        log(f"wxsave timed out after {WXSAVE_TIMEOUT}s: {url}", name)
+        return False, None
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
+        log(f"wxsave failed ({result.returncode}): {' | '.join(tail)}", name)
+        return False, None
+    m = re.search(r"^\[wxsave\] saved: (.+)$", result.stdout, flags=re.M)
+    final = m.group(1).strip() if m else None
+    return True, final
+
+
+def cmd_run(name: str, dry_run: bool = False) -> int:
+    feeds = load_feeds()
+    if name not in feeds:
+        print(f"{TAG} feed not registered: {name}", file=sys.stderr)
+        print(f"  register with: wxwatch --add {name} <feed_id>", file=sys.stderr)
+        return 2
+    feed_id = feeds[name]["feed_id"]
+
+    try:
+        xml_bytes = fetch_feed(feed_id)
+    except (urllib.error.URLError, TimeoutError) as e:
+        log(f"fetch failed: {e}", name)
+        return 1
+    except Exception as e:
+        log(f"fetch error: {e}", name)
+        return 1
+
+    try:
+        items = parse_items(xml_bytes)
+    except ET.ParseError as e:
+        log(f"feed XML parse failed: {e}", name)
+        return 1
+
+    if not items:
+        log("feed parsed but no items (feed may be empty or broken)", name)
+        return 0
+
+    state = load_state(name)
+    seen = set(state.get("seen", []))
+
+    new_items = []
+    for it in items:
+        key = normalize_link(it["link"])
+        if key not in seen:
+            new_items.append((it, key))
+
+    if not new_items:
+        log(f"no new items ({len(items)} already seen in feed)", name)
+        return 0
+
+    log(
+        f"{len(new_items)} new / {len(items)} total items"
+        f"{' (dry-run)' if dry_run else ''}",
+        name,
+    )
+
+    archived = 0
+    for it, key in new_items:
+        if dry_run:
+            log(f"DRY {it['title'][:60]}  →  {it['link']}", name)
+            archived += 1
+            continue
+        ok, final = run_wxsave(it["link"], name)
+        if ok:
+            archived += 1
+            log(f"saved: {final or '(path unknown)'}", name)
+            seen.add(key)
+            state["seen"] = sorted(seen)
+            state["last_archived"] = {
+                "at": dt.datetime.now().isoformat(timespec="seconds"),
+                "link": it["link"],
+                "title": it["title"],
+                "final": final,
+            }
+            save_state(name, state)
+        else:
+            log(f"archive failed (will retry next run): {it['link']}", name)
+
+    verb = "would archive" if dry_run else "archived"
+    log(f"run complete: {verb} {archived}/{len(new_items)}", name)
+    return 0
+
+
+def cmd_add(name: str, feed_id: str, seed: bool) -> int:
+    if not re.fullmatch(r"[a-f0-9]{40}", feed_id):
+        print(f"{TAG} feed_id must be a 40-char hex string (Wechat2RSS format)", file=sys.stderr)
+        return 2
+    feeds = load_feeds()
+    feeds[name] = {
+        "feed_id": feed_id,
+        "registered_at": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    save_feeds(feeds)
+    print(f"{TAG} registered: {name} → {feed_id}")
+
+    if not seed:
+        print(f"{TAG} --no-seed: next run will archive all items currently in the feed.")
+        return 0
+
+    try:
+        xml_bytes = fetch_feed(feed_id)
+        items = parse_items(xml_bytes)
+    except Exception as e:
+        print(f"{TAG} seed fetch failed: {e}", file=sys.stderr)
+        print(f"{TAG} registration kept; next run will archive whatever the feed returns", file=sys.stderr)
+        return 0
+
+    seen = sorted({normalize_link(it["link"]) for it in items})
+    save_state(name, {
+        "seen": seen,
+        "seeded_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "seed_count": len(seen),
+    })
+    print(f"{TAG} seeded {len(seen)} existing item(s) as seen; next run picks up only new articles.")
+    return 0
+
+
+def cmd_list() -> int:
+    feeds = load_feeds()
+    if not feeds:
+        print(f"{TAG} no feeds registered. register with:")
+        print("  wxwatch --add <name> <feed_id>")
+        return 0
+    for name, info in feeds.items():
+        st = load_state(name)
+        last = st.get("last_archived", {})
+        seen_n = len(st.get("seen", []))
+        print(f"  {name}")
+        print(f"    feed_id : {info['feed_id']}")
+        print(f"    seen    : {seen_n}")
+        print(f"    last    : {last.get('at','-')}  {last.get('title','-')}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="wxwatch",
+        description="Monitor a WeChat Official Account and auto-archive new articles via wxsave.",
+    )
+    parser.add_argument("name", nargs="?", help="feed name to run (as registered via --add)")
+    parser.add_argument("--dry-run", action="store_true", help="print what would be archived; don't call wxsave")
+    parser.add_argument("--add", nargs=2, metavar=("NAME", "FEED_ID"), help="register a feed; seeds existing items")
+    parser.add_argument("--no-seed", action="store_true", help="with --add: do NOT seed; first run will archive all current feed items")
+    parser.add_argument("--list", action="store_true", help="list registered feeds and their state")
+    args = parser.parse_args()
+
+    actions = [bool(args.add), args.list, bool(args.name)]
+    if sum(actions) > 1:
+        print(f"{TAG} pick exactly one of: --add, --list, or <name>", file=sys.stderr)
+        return 2
+
+    if args.add:
+        return cmd_add(args.add[0], args.add[1], seed=not args.no_seed)
+    if args.list:
+        return cmd_list()
+    if args.name:
+        return cmd_run(args.name, dry_run=args.dry_run)
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
