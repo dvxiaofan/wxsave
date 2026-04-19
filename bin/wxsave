@@ -19,6 +19,7 @@ REPAIR="$REPO_ROOT/lib/wxsave-repair.js"
 INDEX="$REPO_ROOT/lib/wxsave-index.js"
 ARCHIVED="$REPO_ROOT/lib/wxsave-archived.js"
 REINDEX_URLS="$REPO_ROOT/lib/wxsave-reindex-urls.js"
+BATCH="$REPO_ROOT/lib/wxsave-batch.js"
 
 # Legacy install fallback for people who copied files into ~/.local/share/wxsave
 if [[ ! -f "$HELPER" ]]; then
@@ -29,6 +30,7 @@ if [[ ! -f "$HELPER" ]]; then
   INDEX="$HOME/.local/share/wxsave/wxsave-index.js"
   ARCHIVED="$HOME/.local/share/wxsave/wxsave-archived.js"
   REINDEX_URLS="$HOME/.local/share/wxsave/wxsave-reindex-urls.js"
+  BATCH="$HOME/.local/share/wxsave/wxsave-batch.js"
 fi
 
 OUT_DIR="${WXSAVE_OUTPUT_DIR:-$HOME/Documents/wechat-archive}"
@@ -79,6 +81,25 @@ if [[ "${1:-}" == "--reindex-urls" ]]; then
   exec node "$REINDEX_URLS" "$OUT_DIR" "$@"
 fi
 
+# --batch: archive every URL in a list file sequentially (dedup-aware, 3s
+# rate-limit between real archives, failures accumulate to <input>.failed).
+if [[ "${1:-}" == "--batch" ]]; then
+  shift
+  if [[ ! -f "$BATCH" ]]; then
+    print -u2 "[wxsave] batch script missing: $BATCH"
+    exit 1
+  fi
+  URLS_FILE="${1:-}"
+  if [[ -z "$URLS_FILE" || ! -f "$URLS_FILE" ]]; then
+    print -u2 "[wxsave] --batch requires a URL list file"
+    print -u2 "  usage: wxsave --batch <urls.txt> [--dry-run] [--force]"
+    exit 1
+  fi
+  shift
+  mkdir -p "$OUT_DIR"
+  exec node "$BATCH" "$URLS_FILE" "$OUT_DIR" "$SCRIPT" "$@"
+fi
+
 # --force: skip the "already archived" check and overwrite any existing
 # archive at the same final path. Useful when re-archiving a known URL to pick
 # up fresh images after a failed run.
@@ -92,12 +113,14 @@ URL="${1:-}"
 if [[ -z "$URL" ]]; then
   cat >&2 <<'USAGE'
 Usage:
-  wxsave <url>                      archive one WeChat article (skip if already archived)
-  wxsave --force <url>              re-archive and overwrite existing file
-  wxsave --migrate [--dry-run]      re-group existing archived .html files
-  wxsave --repair  [--dry-run]      repair known HTML corruption in archive
-  wxsave --reindex                  regenerate archive index.html pages
-  wxsave --reindex-urls [--dry-run] rebuild URL → archived-path state from the archive
+  wxsave <url>                        archive one WeChat article (skip if already archived)
+  wxsave --force <url>                re-archive and overwrite existing file
+  wxsave --batch <urls.txt> [--dry-run] [--force]
+                                      archive every URL in the list (3s rate-limit, dedup-aware)
+  wxsave --migrate [--dry-run]        re-group existing archived .html files
+  wxsave --repair  [--dry-run]        repair known HTML corruption in archive
+  wxsave --reindex                    regenerate archive index.html pages
+  wxsave --reindex-urls [--dry-run]   rebuild URL → archived-path state from the archive
 
 Example:
   wxsave https://mp.weixin.qq.com/s/XXXXXXXXXXXXXXXXXX

@@ -114,6 +114,48 @@ wxsave --reindex-urls
 
 **文件被删的场景自动处理**：如果 state 里的记录指向已被 `rm` 的文件，`wxsave` 查询时会自动清理该条目并把 URL 当作未归档处理，下次跑会重新归档。
 
+### 批量归档（`--batch`）
+
+一次性跑一个 URL 列表（比如历史文章回收、别人推荐的一批文章）：
+
+```bash
+wxsave --batch urls.txt              # 逐行跑；已归档自动跳过（复用 dedup）
+wxsave --batch urls.txt --dry-run    # 只打印每条的 SKIP/ARCHIVE 状态，不归档
+wxsave --batch urls.txt --force      # 全部重抓，跳过 dedup
+```
+
+**输入文件格式**：每行一个 URL，`#` 开头和空行忽略：
+
+```
+# 呦呦鹿鸣历史文章
+https://mp.weixin.qq.com/s/QEyGMz4Hc8T...
+https://mp.weixin.qq.com/s/Hsbj4GuObkg...
+
+# 武志红
+https://mp.weixin.qq.com/s/abc123def456...
+```
+
+**运行时行为**：
+- 逐条串行跑（微信反爬不能并发）
+- 已归档立刻 SKIP（~200ms），不计入 sleep
+- 新归档成功后 sleep 3s 再跑下一条（防反爬）
+- 失败 URL 累积到 `<input>.failed`，重试只需 `wxsave --batch urls.txt.failed`
+- Ctrl-C 随时可打断，已处理的保留在 dedup state
+- 末尾刷新索引页一次
+
+典型输出：
+
+```
+[wxsave-batch] 42 URLs parsed from urls.txt (0 comments, 2 blank lines skipped)
+[1/42] https://mp.weixin.qq.com/s/...
+[1/42] SKIP     already archived → 呦呦鹿鸣/2026-01-03_...html
+[2/42] https://mp.weixin.qq.com/s/...
+[2/42] ARCHIVED → 呦呦鹿鸣/2026-04-20_...html
+...
+[wxsave-batch] summary: 10 archived, 32 skipped, 0 failed (42/42)
+[wxsave-batch] index refreshed
+```
+
 ### 自动监控新文章（`wxwatch`）
 
 `wxwatch` 配合 [Wechat2RSS](https://wechat2rss.xlab.app/)（免费的微信公众号 RSS 服务）做**定时拉 feed → 去重 → 自动调 `wxsave` 归档新文章**。
@@ -184,7 +226,7 @@ OUT_DIR="${WXSAVE_OUTPUT_DIR:-$HOME/Documents/wechat-archive}"
 ```
 wxsave/
 ├── bin/
-│   ├── wxsave                  # zsh 入口脚本；分发 --migrate / --repair / --reindex / --reindex-urls
+│   ├── wxsave                  # zsh 入口脚本；分发 --migrate / --repair / --reindex / --reindex-urls / --batch
 │   └── wxwatch                 # python3 监控脚本；调 wxsave 自动归档
 ├── lib/
 │   ├── wxsave-helper.js        # 浏览器内注入脚本（懒加载处理）
@@ -194,7 +236,8 @@ wxsave/
 │   ├── wxsave-index.js         # 生成两级 index.html，归档后自动调一次
 │   ├── wxsave-url.js           # URL 规范化 + 从归档 HTML 抽源 URL
 │   ├── wxsave-archived.js      # 维护 ~/.local/share/wxsave/archived.json（URL 去重 state）
-│   └── wxsave-reindex-urls.js  # 一次性回填 archived.json（wxsave --reindex-urls 调）
+│   ├── wxsave-reindex-urls.js  # 一次性回填 archived.json（wxsave --reindex-urls 调）
+│   └── wxsave-batch.js         # 批量归档：wxsave --batch urls.txt
 ├── install.sh                  # 软链 wxsave + wxwatch 到 ~/.local/bin
 └── README.md
 ```
