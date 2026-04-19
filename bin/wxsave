@@ -17,6 +17,8 @@ POST="$REPO_ROOT/lib/wxsave-postprocess.js"
 MIGRATE="$REPO_ROOT/lib/wxsave-migrate.js"
 REPAIR="$REPO_ROOT/lib/wxsave-repair.js"
 INDEX="$REPO_ROOT/lib/wxsave-index.js"
+ARCHIVED="$REPO_ROOT/lib/wxsave-archived.js"
+REINDEX_URLS="$REPO_ROOT/lib/wxsave-reindex-urls.js"
 
 # Legacy install fallback for people who copied files into ~/.local/share/wxsave
 if [[ ! -f "$HELPER" ]]; then
@@ -25,6 +27,8 @@ if [[ ! -f "$HELPER" ]]; then
   MIGRATE="$HOME/.local/share/wxsave/wxsave-migrate.js"
   REPAIR="$HOME/.local/share/wxsave/wxsave-repair.js"
   INDEX="$HOME/.local/share/wxsave/wxsave-index.js"
+  ARCHIVED="$HOME/.local/share/wxsave/wxsave-archived.js"
+  REINDEX_URLS="$HOME/.local/share/wxsave/wxsave-reindex-urls.js"
 fi
 
 OUT_DIR="${WXSAVE_OUTPUT_DIR:-$HOME/Documents/wechat-archive}"
@@ -62,14 +66,38 @@ if [[ "${1:-}" == "--reindex" ]]; then
   exec node "$INDEX" "$OUT_DIR" "$@"
 fi
 
+# --reindex-urls: rebuild the URL → archived-path state from scratch by
+# scanning the archive. Run once after upgrading, or to recover after losing
+# ~/.local/share/wxsave/archived.json.
+if [[ "${1:-}" == "--reindex-urls" ]]; then
+  shift
+  if [[ ! -f "$REINDEX_URLS" ]]; then
+    print -u2 "[wxsave] reindex-urls script missing: $REINDEX_URLS"
+    exit 1
+  fi
+  mkdir -p "$OUT_DIR"
+  exec node "$REINDEX_URLS" "$OUT_DIR" "$@"
+fi
+
+# --force: skip the "already archived" check and overwrite any existing
+# archive at the same final path. Useful when re-archiving a known URL to pick
+# up fresh images after a failed run.
+FORCE=0
+if [[ "${1:-}" == "--force" ]]; then
+  FORCE=1
+  shift
+fi
+
 URL="${1:-}"
 if [[ -z "$URL" ]]; then
   cat >&2 <<'USAGE'
 Usage:
-  wxsave <url>                    archive one WeChat article
-  wxsave --migrate [--dry-run]    re-group existing archived .html files
-  wxsave --repair  [--dry-run]    repair known HTML corruption in archive
-  wxsave --reindex                regenerate archive index.html pages
+  wxsave <url>                      archive one WeChat article (skip if already archived)
+  wxsave --force <url>              re-archive and overwrite existing file
+  wxsave --migrate [--dry-run]      re-group existing archived .html files
+  wxsave --repair  [--dry-run]      repair known HTML corruption in archive
+  wxsave --reindex                  regenerate archive index.html pages
+  wxsave --reindex-urls [--dry-run] rebuild URL → archived-path state from the archive
 
 Example:
   wxsave https://mp.weixin.qq.com/s/XXXXXXXXXXXXXXXXXX
@@ -81,6 +109,16 @@ fi
 
 if [[ "$URL" != https://mp.weixin.qq.com/* ]]; then
   print -u2 "[wxsave] note: URL does not start with https://mp.weixin.qq.com/ - continuing anyway"
+fi
+
+# Dedup check: unless --force, bail out when this URL is already archived.
+if [[ $FORCE -eq 0 && -f "$ARCHIVED" ]]; then
+  EXISTING="$(node "$ARCHIVED" lookup "$URL" "$OUT_DIR" 2>/dev/null || true)"
+  if [[ -n "$EXISTING" ]]; then
+    print "[wxsave] already archived: $EXISTING"
+    print "[wxsave] (use --force to re-archive)"
+    exit 0
+  fi
 fi
 
 DATE="$(date +%Y-%m-%d)"
@@ -117,7 +155,11 @@ single-file "$URL" \
 
 NEW_FILE="$(ls -1t "$OUT_DIR"/*.html 2>/dev/null | head -1)"
 if [[ -n "$NEW_FILE" ]]; then
-  if POST_OUT="$(node "$POST" "$NEW_FILE" 2>&1)"; then
+  POST_ARGS=("$NEW_FILE" "$URL")
+  if [[ $FORCE -eq 1 ]]; then
+    POST_ARGS+=("--overwrite-existing")
+  fi
+  if POST_OUT="$(node "$POST" "${POST_ARGS[@]}" 2>&1)"; then
     print -r -- "$POST_OUT"
     FINAL_FILE="$(print -r -- "$POST_OUT" \
       | grep -E '^\[wxsave-post\] final: ' \

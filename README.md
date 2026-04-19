@@ -11,6 +11,7 @@
 - 排版 100% 还原（不做 Markdown 转换这种有损操作）
 - 定时监控指定公众号的新文章，自动归档到本地
 - 归档后自动生成按公众号分组、按日期倒序的索引页，直接浏览器翻阅
+- 同一篇文章重复归档自动跳过（跨 URL 形态去重，支持 `--force` 强制重抓）
 
 ## 安装
 
@@ -79,6 +80,40 @@ wxsave --reindex
 
 `--migrate` 和 `--repair` 跑完有实际变更时也会自动跑一次重建。
 
+### 去重（避免重复归档）
+
+默认情况下，`wxsave <url>` 会先查 `~/.local/share/wxsave/archived.json`（URL → 归档文件的映射）：**命中就直接跳过**，不跑 headless Chrome。
+
+```bash
+$ wxsave https://mp.weixin.qq.com/s/QEyGMz4Hc8T39xVYlynhTQ
+[wxsave] already archived: ~/Documents/wechat-archive/呦呦鹿鸣/2026-01-03_...html
+[wxsave] (use --force to re-archive)
+```
+
+去重 key 是规范化 URL，所以同一篇文章的不同链接形态都会命中同一条：
+
+- `https://mp.weixin.qq.com/s/<token>` ← 短链
+- `https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&chksm=...&sn=...` ← 长链
+- 任意带 `#wechat_redirect` 或额外 query 的变体
+
+强制重抓（比如上一次归档时图没抓全、想覆盖旧版）：
+
+```bash
+wxsave --force <url>
+```
+
+文件会原地覆盖，state 记录更新。
+
+首次升级到带去重的 wxsave 后，对已有归档**跑一次**回填：
+
+```bash
+wxsave --reindex-urls
+```
+
+它 walk `OUT_DIR`，从每个 HTML 的 `<meta property=og:url>` 抽出源 URL，写入 state。后续归档会自动维护，不用再手跑。
+
+**文件被删的场景自动处理**：如果 state 里的记录指向已被 `rm` 的文件，`wxsave` 查询时会自动清理该条目并把 URL 当作未归档处理，下次跑会重新归档。
+
 ### 自动监控新文章（`wxwatch`）
 
 `wxwatch` 配合 [Wechat2RSS](https://wechat2rss.xlab.app/)（免费的微信公众号 RSS 服务）做**定时拉 feed → 去重 → 自动调 `wxsave` 归档新文章**。
@@ -142,20 +177,24 @@ OUT_DIR="${WXSAVE_OUTPUT_DIR:-$HOME/Documents/wechat-archive}"
    - **step 2**：提取发布日期（`<em id=publish_time>` → `<meta article:published_time>` → JS 变量 `var ct=...`）和公众号名字（DOM 的 `id=js_name` → 内联 `var nickname=...` → `<meta og:site_name|author>`），把文件移动到 `<OUT_DIR>/<公众号名字>/<YYYY-MM-DD>_<title>.html`
 4. **`wxwatch`**（python3）：拉 Wechat2RSS 的 feed XML → 按 `__biz+mid+idx` 或 `/s/<token>` 做 dedup key → 对未见 item `subprocess.run(["wxsave", url])`，归档完才写 state，失败下次自动重试。
 5. **`lib/wxsave-index.js`**：归档结束（以及 `--migrate` / `--repair` 批量操作结束）后自动跑一次，walk `OUT_DIR` → 按公众号分组、按日期倒序 → 生成 `index.html` + `<公众号>/index.html`。纯静态产物，零 runtime 依赖。
+6. **`lib/wxsave-archived.js`** + **`lib/wxsave-url.js`**：维护 `~/.local/share/wxsave/archived.json`（规范化 URL → 归档文件的相对路径）。`wxsave <url>` 开头查一次，命中就跳过；postprocess 成功时追加。
 
 ## 项目结构
 
 ```
 wxsave/
 ├── bin/
-│   ├── wxsave                  # zsh 入口脚本；分发 --migrate / --repair / --reindex
+│   ├── wxsave                  # zsh 入口脚本；分发 --migrate / --repair / --reindex / --reindex-urls
 │   └── wxwatch                 # python3 监控脚本；调 wxsave 自动归档
 ├── lib/
 │   ├── wxsave-helper.js        # 浏览器内注入脚本（懒加载处理）
-│   ├── wxsave-postprocess.js   # Node 后处理（orphan SVG 修复 + 图片 fetch + 按公众号归档）
+│   ├── wxsave-postprocess.js   # Node 后处理（orphan SVG 修复 + 图片 fetch + 按公众号归档 + 写去重 state）
 │   ├── wxsave-migrate.js       # 旧文件一次性搬到 <公众号名字>/ 子目录
 │   ├── wxsave-repair.js        # 递归扫描 archive 修复 orphan SVG 片段
-│   └── wxsave-index.js         # 生成两级 index.html，归档后自动调一次
+│   ├── wxsave-index.js         # 生成两级 index.html，归档后自动调一次
+│   ├── wxsave-url.js           # URL 规范化 + 从归档 HTML 抽源 URL
+│   ├── wxsave-archived.js      # 维护 ~/.local/share/wxsave/archived.json（URL 去重 state）
+│   └── wxsave-reindex-urls.js  # 一次性回填 archived.json（wxsave --reindex-urls 调）
 ├── install.sh                  # 软链 wxsave + wxwatch 到 ~/.local/bin
 └── README.md
 ```
