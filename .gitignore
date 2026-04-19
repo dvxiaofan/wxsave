@@ -7,3 +7,8 @@ node_modules/
 # Local test artifacts
 test-output/
 *.html
+
+# Local-only development docs (design scratch, debug samples, TODO lists)
+docs.local/*
+!docs.local/README.md
+*.local.md
