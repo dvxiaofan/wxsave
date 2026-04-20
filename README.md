@@ -237,8 +237,13 @@ wxsave/
 │   ├── wxsave-url.js           # URL 规范化 + 从归档 HTML 抽源 URL
 │   ├── wxsave-archived.js      # 维护 ~/.local/share/wxsave/archived.json（URL 去重 state）
 │   ├── wxsave-reindex-urls.js  # 一次性回填 archived.json（wxsave --reindex-urls 调）
-│   └── wxsave-batch.js         # 批量归档：wxsave --batch urls.txt
+│   ├── wxsave-batch.js         # 批量归档：wxsave --batch urls.txt
+│   └── wxsave-extract.js       # 纯函数：extractNickname / extractPublishDate / sanitizeDirName / fixOrphanSvgValues
+├── test/                       # node:test 单测 + 最小 HTML fixtures
+├── scripts/
+│   └── verify-normalize-parity.sh   # Node/Python normalize_link 对齐 smoke
 ├── install.sh                  # 软链 wxsave + wxwatch 到 ~/.local/bin
+├── package.json                # npm test / test:parity 入口（零 runtime deps）
 └── README.md
 ```
 
@@ -248,6 +253,17 @@ wxsave/
 - Python 3.9+（`wxwatch` 使用，macOS 自带）
 - [single-file-cli](https://github.com/gildas-lormeau/single-file-cli) 2.x
 - Google Chrome 或 Chromium
+
+## 开发 / 测试
+
+零外部 deps，`node:test` 内置：
+
+```bash
+npm test            # 单元测试（test/*.test.js, 46 cases）
+npm run test:parity # Node/Python normalize_link 算法对齐 smoke
+```
+
+`scripts/verify-normalize-parity.sh` 确保 `lib/wxsave-url.js` 的 `normalizeUrl`（Node）和 `bin/wxwatch` 的 `normalize_link`（Python）对同一 URL 产出相同的 dedup key。改任一侧都要跑一遍。
 
 ## License
 

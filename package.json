@@ -1,0 +1,10 @@
+{
+  "name": "wxsave",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Archive WeChat Official Account articles as self-contained offline HTML.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:parity": "bash scripts/verify-normalize-parity.sh"
+  }
+}
