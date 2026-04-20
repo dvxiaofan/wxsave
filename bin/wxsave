@@ -203,4 +203,13 @@ if [[ -f "$INDEX" ]]; then
   node "$INDEX" "$OUT_DIR" --quiet 2>/dev/null || true
 fi
 
+# Optional post-archive sync hook: if WXSAVE_SYNC_AFTER is set, run it now so
+# downstream consumers (e.g. a NAS that serves the archive over Caddy) see the
+# new file without waiting for the next cron rsync tick. Non-fatal — a sync
+# failure must not mask a successful archive.
+if [[ -n "${WXSAVE_SYNC_AFTER:-}" ]]; then
+  print "[wxsave] sync: $WXSAVE_SYNC_AFTER"
+  eval "$WXSAVE_SYNC_AFTER" || print -u2 "[wxsave] sync failed (non-fatal)"
+fi
+
 print "[wxsave] done"
