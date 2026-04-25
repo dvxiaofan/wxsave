@@ -8,6 +8,9 @@ node_modules/
 test-output/
 *.html
 
+# Config backups (sensitive - contains auth hashes)
+config-backups/
+
 # Local-only development docs (design scratch, debug samples, TODO lists)
 docs.local/*
 !docs.local/README.md
